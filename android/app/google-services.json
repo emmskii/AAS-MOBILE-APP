@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "97472343187",
+    "project_id": "aas-mobileapp",
+    "storage_bucket": "aas-mobileapp.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:97472343187:android:5ab9ea391bc259e4033166",
+        "android_client_info": {
+          "package_name": "com.example.thesis_project_app_2025"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDJyleAf9KRJNxfwwXCdNnHA35GBhgMP-o"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
