@@ -48,10 +48,22 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
 
 
   // Initialize properties at class level
-  double _lowerPHRange = 6.8;
-  double _upperPHRange = 7.2;
+  double _lowerPHRange = 0;
+  double _upperPHRange = 14;
   Timer? _circulationTimer;
 
+  DateTime? _lastDosingTime;
+  bool _dosingAllowedToday = true;
+
+  bool _phDosageRecyclingActive = false; // Tracks if recycling due to pH dosing is active
+  Timer? _phDosageRecyclingTimer; // Timer for pH dosage recycling
+  bool _allowRecyclingForDosing = true; // Flag to enable/disable recycling during dosing
+
+
+  // Replace the old cm-based variables with liter-based variables
+  double _waterLevelLiters = 0.0;       // Aquarium tank water volume in liters
+  double _pHContainerLiters = 0.0;      // pH container liquid volume in liters
+  double _treatmentWaterLiters = 0.0;   // Treatment tank water volume in liters
 
   @override
   void initState() {
@@ -66,7 +78,9 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
     _startScheduleTimer();
     _fetchLightingSchedules();
     _fetchPHData();
+    _loadPHControlMode();
 
+    _fetchLastDosingTime();
 
     // Add listeners for pH range values
     _database.child('settings/lowerPHRange').onValue.listen((event) {
@@ -97,10 +111,42 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
         }
       }
     });
+
   }
 
-//then the functions and the rest of the code
-  // Fetch water level from Firebase path "sensors/ultra3"
+  void _fetchLastDosingTime() {
+    _database.child('settings/lastDosingTime').onValue.listen((event) {
+      if (event.snapshot.value != null) {
+        // Parse timestamp from Firebase
+        int timestamp = int.parse(event.snapshot.value.toString());
+        setState(() {
+          _lastDosingTime = DateTime.fromMillisecondsSinceEpoch(timestamp);
+          _updateDosingStatus();
+        });
+      }
+    });
+  }
+
+  void _updateDosingStatus() {
+    if (_lastDosingTime != null) {
+      // Check if 24 hours have passed since last dosing
+      DateTime now = DateTime.now();
+      DateTime nextAllowedTime = _lastDosingTime!.add(const Duration(hours: 24));
+
+      setState(() {
+        _dosingAllowedToday = now.isAfter(nextAllowedTime);
+        _nextDoseTime = _dosingAllowedToday ? now : nextAllowedTime;
+      });
+    } else {
+      // No previous dosing recorded
+      setState(() {
+        _dosingAllowedToday = true;
+        _nextDoseTime = DateTime.now();
+      });
+    }
+  }
+
+// Fetch aquarium water volume from Firebase path "sensors/ultra3"
   void _fetchWaterLevel() {
     _database
         .child('sensors/ultra3')
@@ -109,13 +155,13 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
       final data = event.snapshot.value as num?;
       if (data != null) {
         setState(() {
-          _waterLevelCm = data.toDouble(); // Update water level from Firebase
+          _waterLevelLiters = data.toDouble(); // Update water volume from Firebase
         });
       }
     });
   }
 
-  /// Fetch pH Container Liquid Level from `sensors/ultra1`
+  /// Fetch pH Container volume from `sensors/ultra2`
   void _fetchPHContainerLevel() {
     _database
         .child('sensors/ultra2')
@@ -124,12 +170,13 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
       final data = event.snapshot.value;
       if (data != null) {
         setState(() {
-          _pHContainerLevelCm = (data as num).toDouble();
+          _pHContainerLiters = (data as num).toDouble();
         });
       }
     });
   }
 
+  /// Fetch Treatment Tank volume from `sensors/ultra1`
   void _fetchTreatmentWaterLevel() {
     _database
         .child('sensors/ultra1')
@@ -138,7 +185,7 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
       final data = event.snapshot.value;
       if (data != null) {
         setState(() {
-          _treatmentWaterLevelCm = (data as num).toDouble();
+          _treatmentWaterLiters = (data as num).toDouble();
         });
       }
     });
@@ -444,6 +491,24 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
         }
       }
     });
+
+    // Add this to load the pH recycling flag
+    _database.child('settings/allowRecyclingForDosing').onValue.listen((event) {
+      if (event.snapshot.value != null) {
+        setState(() {
+          _allowRecyclingForDosing = event.snapshot.value.toString().toLowerCase() == 'true';
+        });
+      }
+    });
+
+    // To track current pH recycling state
+    _database.child('settings/ph_dosage_recycling_active').onValue.listen((event) {
+      if (event.snapshot.value != null) {
+        setState(() {
+          _phDosageRecyclingActive = event.snapshot.value.toString().toLowerCase() == 'true';
+        });
+      }
+    });
   }
   @override
   Widget build(BuildContext context) {
@@ -638,10 +703,12 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
 
   /// AQUARIUM TANK WIDGET
   Widget _buildAquariumTank() {
+    // Constants for aquarium tank
     double maxTankHeight = 150.0; // Maximum tank height in UI
-    double maxWaterLevel = 30.0; // Maximum water level in cm
-    double waterHeight = (_waterLevelCm / maxWaterLevel) *
-        maxTankHeight; // Scaled height
+    double maxVolumeAquarium = 45.91; // Maximum volume in liters (tank full)
+
+    // Calculate height proportionally based on current volume
+    double waterHeight = (_waterLevelLiters / maxVolumeAquarium) * maxTankHeight;
 
     return Column(
       children: [
@@ -659,7 +726,7 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
               ),
             ),
 
-// Modify the Horizontal Light widget in _buildAquariumTank():
+            // Horizontal Light widget
             Positioned(
               top: 10,
               left: 20,
@@ -695,7 +762,6 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
               duration: const Duration(milliseconds: 500),
               width: 280,
               height: waterHeight.clamp(0, maxTankHeight),
-              // Ensures water stays within the tank
               decoration: BoxDecoration(
                 color: Colors.blue.withAlpha(178),
                 borderRadius: BorderRadius.circular(10),
@@ -704,11 +770,11 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
           ],
         ),
 
-        const SizedBox(height: 10), // Spacing
+        const SizedBox(height: 10),
 
-        // Water Level CM Display
+        // Water Volume Display
         Text(
-          "${_waterLevelCm.toStringAsFixed(1)} cm", // Display water level
+          "${_waterLevelLiters.toStringAsFixed(1)} L", // Display water volume in liters
           style: const TextStyle(
             fontSize: 16,
             fontWeight: FontWeight.bold,
@@ -722,12 +788,10 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
   /// pH CONTAINER WIDGET
   Widget _buildPHContainer(BuildContext context) {
     double maxContainerHeight = 100.0; // Maximum UI height
-    double minLevel = 0.0,
-        maxLevel = 20.0; // Min & max container level (adjust as needed)
+    double maxVolumePH = 0.73; // Maximum volume in liters (container full)
 
-    // Calculate liquid height based on `_pHContainerLevelCm`
-    double liquidHeight = ((_pHContainerLevelCm - minLevel) /
-        (maxLevel - minLevel)) * maxContainerHeight;
+    // Calculate height proportionally based on current volume
+    double liquidHeight = (_pHContainerLiters / maxVolumePH) * maxContainerHeight;
 
     return Column(
       children: [
@@ -749,8 +813,7 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
             AnimatedContainer(
               duration: const Duration(milliseconds: 500),
               width: 60,
-              height: liquidHeight.clamp(10, maxContainerHeight),
-              // Ensure within bounds
+              height: liquidHeight.clamp(0, maxContainerHeight),
               decoration: BoxDecoration(
                 color: Colors.green.withAlpha(204),
                 borderRadius: BorderRadius.circular(8),
@@ -787,12 +850,11 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
           ],
         ),
 
-        const SizedBox(height: 10), // Spacing
+        const SizedBox(height: 10),
 
-        // Display Liquid Level
+        // Display Liquid Volume
         Text(
-          "${_pHContainerLevelCm.toStringAsFixed(1)} cm",
-          // Display actual level
+          "${_pHContainerLiters.toStringAsFixed(2)} L", // Display volume in liters with 2 decimals (small container)
           style: const TextStyle(
             fontSize: 16,
             fontWeight: FontWeight.bold,
@@ -866,9 +928,10 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
   /// TREATMENT TANK WIDGET
   Widget _buildTreatmentTank() {
     double maxTankHeight = 150.0; // Maximum tank height in UI
-    double maxWaterLevel = 30.0; // Maximum water level in cm
-    double waterHeight = (_treatmentWaterLevelCm / maxWaterLevel) *
-        maxTankHeight; // Scaled height
+    double maxVolumeTreatment = 24.82; // Maximum volume in liters (tank full)
+
+    // Calculate height proportionally based on current volume
+    double waterHeight = (_treatmentWaterLiters / maxVolumeTreatment) * maxTankHeight;
 
     return Column(
       children: [
@@ -891,7 +954,6 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
               duration: const Duration(milliseconds: 500),
               width: 180,
               height: waterHeight.clamp(0, maxTankHeight),
-              // Ensures water stays within the tank
               decoration: BoxDecoration(
                 color: Colors.blue.withAlpha(178),
                 borderRadius: BorderRadius.circular(10),
@@ -900,12 +962,11 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
           ],
         ),
 
-        const SizedBox(height: 10), // Spacing
+        const SizedBox(height: 10),
 
-        // Water Level CM Display
+        // Water Volume Display
         Text(
-          "${_treatmentWaterLevelCm.toStringAsFixed(1)} cm",
-          // Display water level
+          "${_treatmentWaterLiters.toStringAsFixed(1)} L", // Display water volume in liters
           style: const TextStyle(
             fontSize: 16,
             fontWeight: FontWeight.bold,
@@ -1124,6 +1185,15 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
     );
   }
 
+  void _loadPHControlMode() async {
+    final snapshot = await _database.child('settings/pHControlMode').get();
+    if (snapshot.exists) {
+      setState(() {
+        _automaticPHControl = snapshot.value.toString().toLowerCase() == 'auto';
+      });
+    }
+  }
+
   Widget _buildPHSection() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1168,14 +1238,31 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
                 _buildPHMeter(),
                 const SizedBox(height: 15),
 
-                // Automatic mode controls
                 if (_automaticPHControl) ...[
                   _buildInfoRow("Aquarium pH:", aquariumPh.toStringAsFixed(2)),
                   _buildPHRangeRow(),
-                  _buildInfoRow("Next dose:", _nextDoseTime != null
-                      ? "${_nextDoseTime!.day}/${_nextDoseTime!.month} ${_nextDoseTime!.hour}:${_nextDoseTime!.minute.toString().padLeft(2, '0')}"
-                      : "Not scheduled"),
-                  _buildInfoRow("Pump status:", _dosingPumpOn ? "ON" : "OFF"),
+                  _buildPHRecyclingControls(),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      // Next dose info
+                      Expanded(
+                        child: _buildInfoRow(
+                            "Next dose:",
+                            _nextDoseTime != null
+                                ? "${_nextDoseTime!.day}/${_nextDoseTime!.month} ${_nextDoseTime!.hour.toString().padLeft(2, '0')}:${_nextDoseTime!.minute.toString().padLeft(2, '0')}"
+                                : "Not scheduled"
+                        ),
+                      ),
+                      // Reset button
+                      IconButton(
+                        onPressed: _resetDosingTimer,
+                        icon: const Icon(Icons.refresh, color: Colors.blue),
+                        tooltip: 'Reset dosing timer',
+                      ),
+                    ],
+                  ),
+                  _buildInfoRow("Dose status:", _dosingAllowedToday ? "Ready" : "Waiting"),
                 ]
                 // Manual mode controls
                 else ...[
@@ -1189,9 +1276,69 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
     );
   }
 
+// Add this method to reset the dosing timer
+  void _resetDosingTimer() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Reset Dosing Timer'),
+        content: const Text('Are you sure you want to reset the dosing timer? This will allow an immediate dosing cycle.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              // Reset the timer by clearing the last dosing time
+              _database.child('settings/lastDosingTime').set(0);
+
+              setState(() {
+                _lastDosingTime = null;
+                _dosingAllowedToday = true;
+                _nextDoseTime = DateTime.now();
+              });
+
+              // Also reset any active pH recycling if it's currently running
+              if (_phDosageRecyclingActive) {
+                _phDosageRecyclingTimer?.cancel();
+                _circulationTimer?.cancel();
+
+                setState(() {
+                  _dualTankCirculation = false;
+                  _phDosageRecyclingActive = false;
+                });
+
+                _database.child('settings').update({
+                  'dual_tank_circulation': false,
+                  'ph_dosage_recycling_active': false
+                });
+
+                _togglePump('pump1', false);
+                _togglePump('pump2', false);
+                _togglePump('filterpump2', false);
+              }
+
+              Navigator.pop(context);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Dosing timer has been reset. Dosing is now available.')),
+              );
+            },
+            child: const Text('Reset'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildPHMeter() {
     // Calculate actual width of the meter component
     final meterWidth = 400.0; // Adjust based on your container width minus padding
+
+    // Define pH scale range to match the visual indicators
+    final minPH = 4.0;
+    final maxPH = 10.0;
+    final pHRange = maxPH - minPH;
 
     return Container(
       height: 50,
@@ -1205,27 +1352,25 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
       ),
       child: Stack(
         children: [
-          // pH scale indicators
-          Positioned.fill(
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: List.generate(11, (index) {
-                final ph = 4.0 + (index * 0.6); // Scale from 4.0 to 10.0
-                return Container(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: Text(
-                    ph.toStringAsFixed(1),
-                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
-                  ),
-                );
-              }),
-            ),
-          ),
+          // pH scale indicators - place at exact positions
+          ...List.generate(7, (index) {
+            final ph = minPH + (index * pHRange / 6); // Evenly distribute from 4.0 to 10.0
+            return Positioned(
+              left: (index * meterWidth / 6),
+              child: Container(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(
+                  ph.toStringAsFixed(1),
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                ),
+              ),
+            );
+          }),
 
           // Current pH indicator - fixed positioning
-          if (aquariumPh >= 4.0 && aquariumPh <= 10.0)
+          if (aquariumPh >= minPH && aquariumPh <= maxPH)
             Positioned(
-              left: ((aquariumPh - 4.0) / 6.0 * meterWidth).clamp(0.0, meterWidth),
+              left: ((aquariumPh - minPH) / pHRange * meterWidth).clamp(0.0, meterWidth),
               child: Container(
                 height: 50,
                 width: 3,
@@ -1238,9 +1383,9 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
             ),
 
           // Lower pH range indicator
-          if (_lowerPHRange >= 4.0 && _lowerPHRange <= 10.0)
+          if (_lowerPHRange >= minPH && _lowerPHRange <= maxPH)
             Positioned(
-              left: ((_lowerPHRange - 4.0) / 6.0 * meterWidth).clamp(0.0, meterWidth),
+              left: ((_lowerPHRange - minPH) / pHRange * meterWidth).clamp(0.0, meterWidth),
               child: Container(
                 height: 50,
                 width: 3,
@@ -1253,9 +1398,9 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
             ),
 
           // Upper pH range indicator
-          if (_upperPHRange >= 4.0 && _upperPHRange <= 10.0)
+          if (_upperPHRange >= minPH && _upperPHRange <= maxPH)
             Positioned(
-              left: ((_upperPHRange - 4.0) / 6.0 * meterWidth).clamp(0.0, meterWidth),
+              left: ((_upperPHRange - minPH) / pHRange * meterWidth).clamp(0.0, meterWidth),
               child: Container(
                 height: 50,
                 width: 3,
@@ -1268,12 +1413,12 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
             ),
 
           // pH range shaded area
-          if (_lowerPHRange >= 4.0 && _upperPHRange <= 10.0)
+          if (_lowerPHRange >= minPH && _upperPHRange <= maxPH)
             Positioned(
-              left: ((_lowerPHRange - 4.0) / 6.0 * meterWidth).clamp(0.0, meterWidth),
+              left: ((_lowerPHRange - minPH) / pHRange * meterWidth).clamp(0.0, meterWidth),
               child: Container(
                 height: 50,
-                width: (((_upperPHRange - _lowerPHRange) / 6.0) * meterWidth).clamp(0.0, meterWidth),
+                width: (((_upperPHRange - _lowerPHRange) / pHRange) * meterWidth).clamp(0.0, meterWidth),
                 color: Colors.white.withOpacity(0.3),
               ),
             ),
@@ -1297,7 +1442,10 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
             ),
             child: Text(
               value,
-              style: const TextStyle(fontSize: 16),
+              style: TextStyle(
+                fontSize: 16,
+                color: (label == "Next dose:" && !_dosingAllowedToday) ? Colors.red : Colors.black,
+              ),
             ),
           ),
         ],
@@ -1397,8 +1545,25 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
   }
 
 
+// Modify existing _activateDosingPumpSequence method
   void _activateDosingPumpSequence() {
-    // Activate dosing pump 4 times with 5 second gap
+    // Check if dosing is allowed today
+    if (!_dosingAllowedToday && _automaticPHControl) {
+      // Skip dosing if in automatic mode and already dosed today
+      return;
+    }
+
+    // Record dosing time
+    final now = DateTime.now();
+    _database.child('settings/lastDosingTime').set(now.millisecondsSinceEpoch);
+
+    setState(() {
+      _lastDosingTime = now;
+      _dosingAllowedToday = false;
+      _nextDoseTime = now.add(const Duration(hours: 24));
+    });
+
+    // Existing code for the dosing sequence
     _decreasePHLevel();
 
     Future.delayed(const Duration(seconds: 5), () {
@@ -1414,17 +1579,30 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
     });
   }
 
+// Modify the _activateDualTankCirculation method to check the new flag
   void _activateDualTankCirculation() {
+    // Check if recycling for pH dosing is allowed
+    if (!_allowRecyclingForDosing) {
+      // Don't activate circulation, but still ensure dosing works
+      return;
+    }
+
     // Cancel any existing timer
     _circulationTimer?.cancel();
+    _phDosageRecyclingTimer?.cancel();
 
     // Turn on circulation
     setState(() {
       _dualTankCirculation = true;
+      _phDosageRecyclingActive = true;
       _manualOverride = false;
     });
 
-    _database.child('settings').update({'dual_tank_circulation': true});
+    _database.child('settings').update({
+      'dual_tank_circulation': true,
+      'ph_dosage_recycling_active': true
+    });
+
     _togglePump('pump1', true);
     _togglePump('pump2', true);
     _togglePump('filterpump2', true);
@@ -1433,9 +1611,14 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
     _circulationTimer = Timer(const Duration(minutes: 3), () {
       setState(() {
         _dualTankCirculation = false;
+        _phDosageRecyclingActive = false;
       });
 
-      _database.child('settings').update({'dual_tank_circulation': false});
+      _database.child('settings').update({
+        'dual_tank_circulation': false,
+        'ph_dosage_recycling_active': false
+      });
+
       _togglePump('pump1', false);
       _togglePump('pump2', false);
       _togglePump('filterpump2', false);
@@ -1497,6 +1680,56 @@ class _ControlPanelPageState extends State<ControlPanelPage> {
                 _activateDualTankCirculation();
               },
               child: const Text('Confirm')
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPHRecyclingControls() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8.0),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          // Make label text smaller and more compact
+          const Text("pH Dosing Recycling:",
+              style: TextStyle(fontSize: 14)),
+
+          // More compact status indicator and switch
+          Row(
+            mainAxisSize: MainAxisSize.min, // Take minimum space
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), // Reduced padding
+                decoration: BoxDecoration(
+                  color: _phDosageRecyclingActive ? Colors.green[100] : Colors.grey[200],
+                  borderRadius: BorderRadius.circular(4), // Smaller radius
+                ),
+                child: Text(
+                  _phDosageRecyclingActive ? "ON" : "OFF", // Shorter text
+                  style: TextStyle(
+                    fontSize: 14, // Smaller font
+                    color: _phDosageRecyclingActive ? Colors.green[800] : Colors.grey[700],
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              // Smaller gap
+              const SizedBox(width: 6),
+              // Switch with no label, just on/off visual
+              Switch(
+                value: _allowRecyclingForDosing,
+                onChanged: (value) {
+                  setState(() {
+                    _allowRecyclingForDosing = value;
+                  });
+                  _database.child('settings/allowRecyclingForDosing').set(value);
+                },
+                // Make switch more compact if possible
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+            ],
           ),
         ],
       ),

@@ -3,6 +3,7 @@ import 'control_panel.dart';
 import 'main.dart'; // Import Login Page
 import 'package:firebase_database/firebase_database.dart';
 import 'dart:math';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 class HomePage extends StatefulWidget {
   final String fullName;
@@ -21,6 +22,21 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
+  // Constants for tank dimensions (in inches)
+  final double AQUARIUM_LENGTH = 24.0;    // ultra3
+  final double AQUARIUM_WIDTH = 12.0;
+  final double AQUARIUM_HEIGHT = 10.0;
+  final double TREATMENT_LENGTH = 12.0;   // ultra1
+  final double TREATMENT_WIDTH = 10.0;
+  final double TREATMENT_HEIGHT = 8.0;
+  final double PH_CONTAINER_LENGTH = 3.0;  // ultra2
+  final double PH_CONTAINER_WIDTH = 3.5;
+  final double PH_CONTAINER_HEIGHT = 9.0;
+
+  double _waterLevelTank1Liters = 0.0; // Main Tank volume in liters
+  double _waterLevelTank2Liters = 0.0; // Treatment Tank volume in liters
+  double _pHContainerLevelLiters = 0.0; // pH container volume in liters
+
   double _phLevelMainTank = 0; // Initial pH value
   double _phLevelTreatmentTank = 0;
   double _temperature = 0; // Initial temperature (°C)
@@ -32,54 +48,167 @@ class _HomePageState extends State<HomePage> {
   String recyclingTimeLeft = "5:30 min left"; // Example initial time
   bool lightStatus = true; // Example: true = ON, false = OFF
 
+  // Constants for normal ranges
+  final double minPhLevel = 6.5;
+  final double maxPhLevel = 8.5;
+  final double minTemperature = 15.0;
+  final double maxTemperature = 33.0;
+
+  // Variables to track if notifications have been shown
+  bool _phNotificationShown = false;
+  bool _tempNotificationShown = false;
+
   final DatabaseReference _database = FirebaseDatabase.instance.ref();
+
+  // Notifications plugin
+  final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+  FlutterLocalNotificationsPlugin();
 
   @override
   void initState() {
     super.initState();
+    _initializeNotifications();
     _fetchSensorData(); // Fetch pH and temperature data
     _fetchWaterLevel(); // Fetch main tank water level
     _fetchTreatmentWaterLevel(); // Fetch treatment tank water level
     _fetchPHContainerLevel(); // Fetch pH container level
   }
 
-  /// Fetch pH and Temperature Data
+  // Initialize notifications
+  Future<void> _initializeNotifications() async {
+    const AndroidInitializationSettings initializationSettingsAndroid =
+    AndroidInitializationSettings('@mipmap/ic_launcher');
+
+    const InitializationSettings initializationSettings = InitializationSettings(
+      android: initializationSettingsAndroid,
+    );
+
+    await flutterLocalNotificationsPlugin.initialize(
+      initializationSettings,
+    );
+  }
+
+  // Show notification when values are out of range
+  Future<void> _showNotification({
+    required String title,
+    required String body,
+    required int id,
+  }) async {
+    const AndroidNotificationDetails androidPlatformChannelSpecifics =
+    AndroidNotificationDetails(
+      'aquaponics_alerts', // Channel ID
+      'Aquaponics Alerts', // Channel name
+      channelDescription: 'Alerts for out-of-range sensor values',
+      importance: Importance.high,
+      priority: Priority.high,
+    );
+
+    const NotificationDetails platformChannelSpecifics = NotificationDetails(
+      android: androidPlatformChannelSpecifics,
+    );
+
+    await flutterLocalNotificationsPlugin.show(
+      id,
+      title,
+      body,
+      platformChannelSpecifics,
+    );
+  }
+
+  // Check if pH is within normal range and show notification if needed
+  void _checkPhLevel(double phValue) {
+    if ((phValue < minPhLevel || phValue > maxPhLevel) && !_phNotificationShown) {
+      _phNotificationShown = true;
+      _showNotification(
+        title: 'pH Level Alert',
+        body: 'pH level (${phValue.toStringAsFixed(1)}) is outside the normal range (6.5-8.5)',
+        id: 1,
+      );
+
+      // Show a snackbar as well for immediate feedback
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('pH level (${phValue.toStringAsFixed(1)}) is outside the normal range!'),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    } else if (phValue >= minPhLevel && phValue <= maxPhLevel) {
+      // Reset the notification flag when pH returns to normal range
+      _phNotificationShown = false;
+    }
+  }
+
+  // Check if temperature is within normal range and show notification if needed
+  void _checkTemperature(double temp) {
+    if ((temp < minTemperature || temp > maxTemperature) && !_tempNotificationShown) {
+      _tempNotificationShown = true;
+      _showNotification(
+        title: 'Temperature Alert',
+        body: 'Temperature (${temp.toStringAsFixed(1)}°C) is outside the normal range (15-33°C)',
+        id: 2,
+      );
+
+      // Show a snackbar as well for immediate feedback
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Temperature (${temp.toStringAsFixed(1)}°C) is outside the normal range!'),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    } else if (temp >= minTemperature && temp <= maxTemperature) {
+      // Reset the notification flag when temperature returns to normal range
+      _tempNotificationShown = false;
+    }
+  }
+
   void _fetchSensorData() {
+    // Listen for pH values
     _database.child('sensors').onValue.listen((DatabaseEvent event) {
       if (event.snapshot.value != null) {
         final data = Map<String, dynamic>.from(event.snapshot.value as Map);
 
         setState(() {
-          // Update pH and temperature values
-          _phLevelMainTank = (data["ph2"] as num).toDouble();
-          _phLevelTreatmentTank = (data["ph1"] as num).toDouble();
-          _temperature = (data["temperature"] as num).toDouble();
+          // Update pH values
+          _phLevelMainTank = (data["ph2"] as num?)?.toDouble() ?? 0.0;
+          _phLevelTreatmentTank = (data["ph1"] as num?)?.toDouble() ?? 0.0;
+        });
+      }
+    });
+
+    // Listen specifically for temperature
+    _database.child('sensors/temperature').onValue.listen((DatabaseEvent event) {
+      if (event.snapshot.value != null) {
+        setState(() {
+          _temperature = (event.snapshot.value as num).toDouble();
+          _checkTemperature(_temperature);
         });
       }
     });
   }
 
-  // Fetch water level from Firebase path "sensors/ultra3" (Main Tank)
+// Fetch water level from Firebase and convert to liters (Main Tank)
   void _fetchWaterLevel() {
     _database.child('sensors/ultra3').onValue.listen((event) {
       final data = event.snapshot.value as num?;
       if (data != null) {
         setState(() {
-          // Scale to 30 cm max as in original code
-          _waterLevelTank1 = data.toDouble();
+          // The data is already in liters based on the Arduino code
+          _waterLevelTank1Liters = data.toDouble();
         });
       }
     });
   }
 
-  // Fetch treatment tank water level from "sensors/ultra1"
+// Fetch treatment tank water level from "sensors/ultra1"
   void _fetchTreatmentWaterLevel() {
     _database.child('sensors/ultra1').onValue.listen((event) {
       final data = event.snapshot.value;
       if (data != null) {
         setState(() {
-          // Scale to 20 cm max as in original code
-          _waterLevelTank2 = (data as num).toDouble();
+          // The data is already in liters based on the Arduino code
+          _waterLevelTank2Liters = (data as num).toDouble();
         });
       }
     });
@@ -91,7 +220,8 @@ class _HomePageState extends State<HomePage> {
       final data = event.snapshot.value;
       if (data != null) {
         setState(() {
-          _pHContainerLevelCm = (data as num).toDouble();
+          // The data is already in liters based on the Arduino code
+          _pHContainerLevelLiters = (data as num).toDouble();
         });
       }
     });
@@ -187,6 +317,9 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildPhGauge(double phValue) {
+    // Determine if pH is out of range
+    bool isOutOfRange = phValue < minPhLevel || phValue > maxPhLevel;
+
     return Column(
       children: [
         Stack(
@@ -223,15 +356,29 @@ class _HomePageState extends State<HomePage> {
           ],
         ),
         const SizedBox(height: 8),
-        Text(
-          'pH Level: ${phValue.toStringAsFixed(1)}',
-          style: const TextStyle(fontSize: 16, color: Colors.white),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              'pH Level: ${phValue.toStringAsFixed(1)}',
+              style: TextStyle(
+                fontSize: 16,
+                color: Colors.white,
+                fontWeight: isOutOfRange ? FontWeight.bold : FontWeight.normal,
+              ),
+            ),
+            if (isOutOfRange)
+              const Icon(Icons.warning, color: Colors.amber, size: 20),
+          ],
         ),
       ],
     );
   }
 
   Widget _buildTemperatureGauge(double temperature, double gaugeWidth) {
+    // Determine if temperature is out of range
+    bool isOutOfRange = temperature < minTemperature || temperature > maxTemperature;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
@@ -273,7 +420,7 @@ class _HomePageState extends State<HomePage> {
                 height: 20,
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(10),
-                  color: Colors.red,
+                  color: isOutOfRange ? Colors.orange : Colors.red,
                 ),
               ),
             ),
@@ -297,18 +444,45 @@ class _HomePageState extends State<HomePage> {
         const SizedBox(height: 5),
 
         // Display temperature value
-        Text(
-          'Temperature: ${temperature.toStringAsFixed(1)}°C',
-          style: const TextStyle(fontSize: 16, color: Colors.white),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              'Temperature: ${temperature.toStringAsFixed(1)}°C',
+              style: TextStyle(
+                fontSize: 16,
+                color: Colors.white,
+                fontWeight: isOutOfRange ? FontWeight.bold : FontWeight.normal,
+              ),
+            ),
+            if (isOutOfRange)
+              const Icon(Icons.warning, color: Colors.amber, size: 20),
+          ],
         ),
       ],
     );
   }
 
-  Widget _buildWaterTankGauge(double waterLevel, String tankName) {
-    double maxTankHeight = tankName == "Main Tank" ? 120 : 80; // Main tank is larger
-    double maxTankWidth = tankName == "Main Tank" ? 160 : 80; // Treatment tank is smaller
-    double waterHeight = (waterLevel / 25.0) * maxTankHeight; // Scale water level
+  Widget _buildWaterTankGauge(double waterLevelLiters, String tankName) {
+    // Calculate max volume for scaling visualization
+    double maxTankHeight = tankName == "Main Tank" ? 120 : 80; // Main tank is larger in UI
+    double maxTankWidth = tankName == "Main Tank" ? 160 : 80; // Treatment tank is smaller in UI
+
+    // Calculate max volume in liters
+    double maxVolumeLiters;
+    if (tankName == "Main Tank") {
+      // Max volume of main tank in liters
+      maxVolumeLiters = (AQUARIUM_LENGTH * AQUARIUM_WIDTH * AQUARIUM_HEIGHT * 2.54 * 2.54 * 2.54) / 1000.0;
+    } else {
+      // Max volume of treatment tank in liters
+      maxVolumeLiters = (TREATMENT_LENGTH * TREATMENT_WIDTH * TREATMENT_HEIGHT * 2.54 * 2.54 * 2.54) / 1000.0;
+    }
+
+    // Scale water level for visualization
+    double waterHeight = (waterLevelLiters / maxVolumeLiters) * maxTankHeight;
+
+    // Cap the waterHeight to prevent overflow in UI
+    waterHeight = waterHeight.clamp(0, maxTankHeight);
 
     return Column(
       children: [
@@ -346,9 +520,9 @@ class _HomePageState extends State<HomePage> {
           ],
         ),
         const SizedBox(height: 5),
-        // Display Water Level Value
+        // Display Water Level Value in Liters
         Text(
-          "${waterLevel.toStringAsFixed(1)} cm",
+          "${waterLevelLiters.toStringAsFixed(1)} L",
           style: const TextStyle(
             fontSize: 18,
             fontWeight: FontWeight.bold,
@@ -361,12 +535,14 @@ class _HomePageState extends State<HomePage> {
 
 
   /// Green pH Container Widget (Without Arrow)
-  Widget _buildGreenPhContainerLevel(double pHContainerLevelCm, String label) {
+  Widget _buildGreenPhContainerLevel(double pHContainerLevelLiters, String label) {
     double maxContainerHeight = 80.0; // Maximum UI height
-    double minLevel = 0.0, maxLevel = 20.0; // Min & max container level (adjust as needed)
 
-    // Calculate liquid height based on `pHContainerLevelCm`
-    double liquidHeight = ((pHContainerLevelCm - minLevel) / (maxLevel - minLevel)) * maxContainerHeight;
+    // Calculate max volume of pH container in liters
+    double maxVolumeLiters = (PH_CONTAINER_LENGTH * PH_CONTAINER_WIDTH * PH_CONTAINER_HEIGHT * 2.54 * 2.54 * 2.54) / 1000.0;
+
+    // Calculate liquid height based on volume in liters
+    double liquidHeight = (pHContainerLevelLiters / maxVolumeLiters) * maxContainerHeight;
 
     return Column(
       children: [
@@ -400,7 +576,7 @@ class _HomePageState extends State<HomePage> {
             AnimatedContainer(
               duration: const Duration(milliseconds: 500),
               width: 30,
-              height: liquidHeight.clamp(10, maxContainerHeight), // Ensure within bounds
+              height: liquidHeight.clamp(0, maxContainerHeight), // Ensure within bounds
               decoration: BoxDecoration(
                 color: Colors.green.withAlpha(204),
                 borderRadius: BorderRadius.circular(8),
@@ -411,9 +587,9 @@ class _HomePageState extends State<HomePage> {
 
         const SizedBox(height: 10), // Spacing
 
-        // Display Liquid Level
+        // Display Liquid Level in Liters
         Text(
-          "${pHContainerLevelCm.toStringAsFixed(1)} cm", // Display actual level
+          "${pHContainerLevelLiters.toStringAsFixed(1)} L", // Display in liters
           style: const TextStyle(
             fontSize: 16,
             fontWeight: FontWeight.bold,
@@ -493,9 +669,9 @@ class _HomePageState extends State<HomePage> {
                             // Left Side - Tanks
                             Column(
                               children: [
-                                _buildWaterTankGauge(_waterLevelTank1, "Main Tank"),
+                                _buildWaterTankGauge(_waterLevelTank1Liters, "Main Tank"),
                                 const SizedBox(height: 5),
-                                _buildWaterTankGauge(_waterLevelTank2, "Treatment Tank"),
+                                _buildWaterTankGauge(_waterLevelTank2Liters, "Treatment Tank"),
                               ],
                             ),
 
@@ -511,7 +687,7 @@ class _HomePageState extends State<HomePage> {
 
                                 const SizedBox(height: 20),
                                 // Replace treatment pH gauge with green pH container level
-                                _buildGreenPhContainerLevel(_pHContainerLevelCm, "pH down Container")
+                                _buildGreenPhContainerLevel(_pHContainerLevelLiters, "pH down Container")
 
                               ],
                             ),
